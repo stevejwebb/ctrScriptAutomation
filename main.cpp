@@ -9,6 +9,7 @@
 #include <netinet/in.h>
 #include <netdb.h>
 #include <sys/ioctl.h>
+#include <arpa/inet.h>
 //to allow sleep function c++11 onwards
 #include <chrono>
 #include <thread>
@@ -19,6 +20,11 @@
 volatile bool failedToConnect = false;
 void handle(int sig) {
     failedToConnect = true;
+    exit(0);
+}
+//hanlde ctrl-c
+void handle_ctrl_c(int sig) {
+  std::cout << std::endl << "Caught ctr-c! Terminating program." << std::endl;
 }
 
 class Utilities {
@@ -59,9 +65,12 @@ public:
   int totalBytesRead = 0;
   int delay = 1000;
   unsigned long iMode = 1;
+  const unsigned int CONNECT_DELAY = 5;
+  const unsigned int ALARM_CANCEL = 0;
   bool expect(int socketFD, std::string searchString)
   {
     signal(SIGALRM, handle); //timeout
+    //signal(SIGINT, handle_ctrl_c); //catch ctrl-c
     
     ioctl(socketFD, FIONBIO, &iMode); //set non-blocking
     alarm(5);
@@ -82,6 +91,8 @@ public:
   }
   bool sendData(int socketFD, std::string data)
   {
+    signal(SIGALRM, handle); //timeout
+    //signal(SIGINT, handle_ctrl_c); //catch ctrl-c
     //hack to get data into a raw format to send
     char buffer[data.size()+1];
     data.copy(buffer,data.size()+1);
@@ -108,6 +119,24 @@ public:
     if (result) return true;
     return false;
   }
+  bool connectUnit(int socketFD, char *IpString)
+  {
+    utils.debug("Trying to connect to ");
+    struct addrinfo hints, *res;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+    getaddrinfo(IpString, "23", &hints, &res);
+
+    alarm(CONNECT_DELAY); //set timeout
+    if (connect(socketFD, res->ai_addr, res->ai_addrlen) < 0) 
+    {
+      utils.debug("Error connecting");
+      return false;
+    }
+    alarm(ALARM_CANCEL);//we are okay now
+    return true;
+  }
 };
 
 int main(int argc, char *argv[])
@@ -117,7 +146,8 @@ const unsigned int TELNET_PORT = 23;
 const unsigned int CONNECT_DELAY = 5;
 const unsigned int ALARM_CANCEL = 0;
 
-signal(SIGALRM, handle);
+signal(SIGALRM, handle); //timeout
+//signal(SIGINT, handle_ctrl_c); //catch ctrl-c
 
   Utilities utils;
   Telnet telnet;
@@ -125,15 +155,7 @@ signal(SIGALRM, handle);
   utils.cls(4);
   utils.debug("CTR Auto Scripting");
   
-  int socketFD, portNo, bytesRead;
-  char buffer[1000];
-  portNo = 23; //why not accept the define?
-  struct addrinfo hints, *res;
-  memset(&hints, 0, sizeof(hints));
-
-  hints.ai_family = AF_INET;
-  hints.ai_socktype = SOCK_STREAM;
-
+  int socketFD;
   socketFD = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
   
   if (socketFD < 0)
@@ -141,21 +163,22 @@ signal(SIGALRM, handle);
     utils.debug("Failed to open socket!");
     exit(0);
   }
-  utils.debug("Socket open");
-  
-  
-  getaddrinfo("11.200.2.26", "23", &hints, &res);
-  //alarm(CONNECT_DELAY);
-  if (connect(socketFD, res->ai_addr, res->ai_addrlen) < 0) 
-  {
-    utils.debug("Error connecting");
-    std::cout << "Failed to connect is " << failedToConnect << std::endl;
-    exit(0);
-  }
-  //alarm(ALARM_CANCEL);
-  std::cout << "Failed to connect is " << failedToConnect << std::endl;
+  char ipString[15]  = {"11.200.2.26"};
+  //------------ Start of loop to process the scripts --------------------------
+  //ToDo: from here you need to process the ip file and script feel
+  //create a loop and error checking to skip problem node
+  //have a debug output file also
+  //nice to have a time stamp on debug output and log
+
+  //------------- main connection and login to the node -----------------------
+  telnet.connectUnit(socketFD, ipString);
   bool result = telnet.login(socketFD, "login:", "assword:", "root\n", "admin123\n", "#");
+  //---------------------------------------------------------------------------
+  
   (result) ? utils.debug("Logged in!") : exit(0);
+  
+  telnet.sendData(socketFD, "show int stat\n");
+  telnet.expect(socketFD, "#");
 
   return 0;
 }
