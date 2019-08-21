@@ -1,11 +1,25 @@
 #include <iostream>
-#include <boost/array.hpp>
-#include <boost/asio.hpp>
+#include <string>
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <string.h>
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <netdb.h>
+#include <sys/ioctl.h>
+//to allow sleep function c++11 onwards
+#include <chrono>
+#include <thread>
+//SIGNAL ALAMR FOR TIMEOUT
+#include <signal.h>
 
-using boost::asio::ip::tcp;
-
-#define TEST_HOST = '11.200.2.26'
-#define TELNET_PORT = 23
+//try to use this as a timeout
+volatile bool failedToConnect = false;
+void handle(int sig) {
+    failedToConnect = true;
+}
 
 class Utilities {
   public:
@@ -24,58 +38,124 @@ class Utilities {
     }
     
   }
-
+  void debug(std::string dbgMsg)
+  {
+    std::cout << "DEBUG: " << dbgMsg << std::endl;
+  }
+  void debug(std::string dbgMsg, int num)
+  {
+    std::cout << "DEBUG: " << dbgMsg << num << std::endl;
+  }
 };
 
-int main(int argc, char *argv[]){
+class Telnet {
+public:
   Utilities utils;
-  utils.cls();
-
-  // Any program that uses asio need to have at least one io_service object
-  boost::asio::io_service io_service;
-
-  // Convert the server name that was specified as a parameter to the application, to a TCP endpoint. 
-  // To do this, we use an ip::tcp::resolver object.
-  tcp::resolver resolver(io_service);
-
-  // A resolver takes a query object and turns it into a list of endpoints. 
-  // We construct a query using the name of the server, specified in argv[1], 
-  // and the name of the service, in this case "daytime".
-  tcp::resolver::query query("11.200.2.26", "telnet");
-
-  // The list of endpoints is returned using an iterator of type ip::tcp::resolver::iterator. 
-  // A default constructed ip::tcp::resolver::iterator object can be used as an end iterator.
-  tcp::resolver::iterator endpoint_iterator = resolver.resolve(query);
-
-  // Now we create and connect the socket.
-  // The list of endpoints obtained above may contain both IPv4 and IPv6 endpoints, 
-  // so we need to try each of them until we find one that works. 
-  // This keeps the client program independent of a specific IP version. 
-  // The boost::asio::connect() function does this for us automatically.
-  tcp::socket socket(io_service);
-  boost::asio::connect(socket, endpoint_iterator);
-
-  for (;;)
+  char buffer[10000];
+  int bytesRead;
+  int bytesSent = 0;
+  int bytesSentLength = 0;
+  std::string stringBuffer;
+  int totalBytesRead = 0;
+  int delay = 1000;
+  unsigned long iMode = 1;
+  bool expect(int socketFD, std::string searchString)
+  {
+    signal(SIGALRM, handle); //timeout
+    
+    ioctl(socketFD, FIONBIO, &iMode); //set non-blocking
+    alarm(5);
+    for(;;)
     {
-      // We use a boost::array to hold the received data. 
-      boost::array<char, 10000> buf;
-      boost::system::error_code error;
-
-      // The boost::asio::buffer() function automatically determines 
-      // the size of the array to help prevent buffer overruns.
-      size_t len = socket.read_some(boost::asio::buffer(buf), error);
-
-      // When the server closes the connection, 
-      // the ip::tcp::socket::read_some() function will exit with the boost::asio::error::eof error, 
-      // which is how we know to exit the loop.
-  
-      if (error == boost::asio::error::eof)
-        break; // Connection closed cleanly by peer.
-      else if (error)
-        throw boost::system::system_error(error); // Some other error.
-
-      std::cout.write(buf.data(), len);
-      std::cout << std::endl; //flush buffer
+      bytesRead = read(socketFD, buffer, sizeof(buffer));
+      stringBuffer = buffer;
+      totalBytesRead += bytesRead;
+      if (stringBuffer.find(searchString) != std::string::npos)
+      {
+        //utils.debug("Total Bytes Read: ",totalBytesRead);
+        alarm(0);
+        return true;
+      }
+      if (failedToConnect) return false;
+      
     }
-  return 0;
   }
+  bool sendData(int socketFD, std::string data)
+  {
+    //hack to get data into a raw format to send
+    char buffer[data.size()+1];
+    data.copy(buffer,data.size()+1);
+    buffer[data.size()] = '\0';
+
+    bytesSentLength = data.length();
+    bytesSent = send(socketFD, buffer, sizeof(buffer), 0);
+    if (bytesSent)
+    {
+      return true;
+    }
+    return false;
+  }
+  bool login(int socketFD, std::string loginPrompt, std::string passwordPrompt, std::string userName, std::string password, std::string prompt)
+  {
+    bool result = false; //set expectation to fail
+    result = expect(socketFD, loginPrompt);
+    result = sendData(socketFD, userName);
+    result = expect(socketFD, passwordPrompt);
+    result = sendData(socketFD, password);
+    //look for login prompt to show it went okay
+    result = sendData(socketFD, "\n"); //prompt with CR
+    result = expect(socketFD, prompt);
+    if (result) return true;
+    return false;
+  }
+};
+
+int main(int argc, char *argv[])
+{
+const std::string TEST_HOST = "11.200.2.26";
+const unsigned int TELNET_PORT = 23;
+const unsigned int CONNECT_DELAY = 5;
+const unsigned int ALARM_CANCEL = 0;
+
+signal(SIGALRM, handle);
+
+  Utilities utils;
+  Telnet telnet;
+
+  utils.cls(4);
+  utils.debug("CTR Auto Scripting");
+  
+  int socketFD, portNo, bytesRead;
+  char buffer[1000];
+  portNo = 23; //why not accept the define?
+  struct addrinfo hints, *res;
+  memset(&hints, 0, sizeof(hints));
+
+  hints.ai_family = AF_INET;
+  hints.ai_socktype = SOCK_STREAM;
+
+  socketFD = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+  
+  if (socketFD < 0)
+  {
+    utils.debug("Failed to open socket!");
+    exit(0);
+  }
+  utils.debug("Socket open");
+  
+  
+  getaddrinfo("11.200.2.26", "23", &hints, &res);
+  //alarm(CONNECT_DELAY);
+  if (connect(socketFD, res->ai_addr, res->ai_addrlen) < 0) 
+  {
+    utils.debug("Error connecting");
+    std::cout << "Failed to connect is " << failedToConnect << std::endl;
+    exit(0);
+  }
+  //alarm(ALARM_CANCEL);
+  std::cout << "Failed to connect is " << failedToConnect << std::endl;
+  bool result = telnet.login(socketFD, "login:", "assword:", "root\n", "admin123\n", "#");
+  (result) ? utils.debug("Logged in!") : exit(0);
+
+  return 0;
+}
