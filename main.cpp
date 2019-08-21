@@ -1,7 +1,4 @@
-/* Process CTR Script
-Open a file and use that
-*/
-#include<iostream>
+#include <iostream>
 
 class Utilities {
   public:
